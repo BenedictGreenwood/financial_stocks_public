@@ -1,0 +1,432 @@
+---
+title: "Data Analyst Portfolio Project: Finance Data Analysis (S&P 500 Stocks)"
+author: "Benedict Greenwood"
+date: "2026-02-06"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+---
+
+This project demonstrates core Data Analyst skills:
+- Importing real-world finance data
+- Cleaning data (duplicates + missing values)
+- Exploratory Data Analysis (EDA)
+- Descriptive statistics
+- Visualization
+- Hypothesis testing with statistical assumption checks
+- Correlation + Linear Regression modeling
+- Reporting results in a professional format
+
+Data from https://www.kaggle.com/datasets/camnugent/sandp500?resource=download
+
+## Libraries
+
+```{r setup, include=FALSE}
+#Setup
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+# Load libraries
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(lubridate)
+library(zoo)
+library(naniar)
+library(performance)
+library(report)
+library(corrplot)
+library(broom)
+library(ggthemes)
+library(lmtest)
+library(sandwich)
+```
+
+## Data import
+
+```{r}
+# Set file path
+file_path <- "all_stocks_5yr.csv"
+
+stocks_raw <- read_csv(file_path)
+
+# Quick look
+glimpse(stocks_raw)
+head(stocks_raw)
+
+```
+## Data cleaning
+
+```{r}
+
+#Create cleaner variable names
+stocks <- stocks_raw %>%
+  clean_names()
+
+colnames(stocks)
+
+
+# Check missing values
+miss_summary <- stocks %>%
+  summarise(across(everything(), ~ sum(is.na(.))))
+
+miss_summary #view missing values summary
+
+# Remove duplicate rows
+n_before <- nrow(stocks)
+stocks <- stocks %>% distinct()
+n_after <- nrow(stocks)
+
+cat("Rows before removing duplicates:", n_before, "\n")
+cat("Rows after removing duplicates:", n_after, "\n")
+cat("Duplicates removed:", n_before - n_after, "\n")
+
+```
+## Impute missing data
+
+For financial time series, imputing missing values using Last Observation Carried Forward (LOCF) is common.
+
+We'll impute missing numeric values per stock ticker using forward fill, then backward fill for leading missing values.
+
+```{r}
+stocks <- stocks %>%
+  group_by(name) %>%
+  arrange(date) %>%
+  mutate(
+    open = na.locf(open, na.rm = FALSE),
+    high = na.locf(high, na.rm = FALSE),
+    low  = na.locf(low, na.rm = FALSE),
+    close = na.locf(close, na.rm = FALSE),
+    volume = na.locf(volume, na.rm = FALSE)
+  ) %>%
+  mutate(
+    open = na.locf(open, fromLast = TRUE, na.rm = FALSE),
+    high = na.locf(high, fromLast = TRUE, na.rm = FALSE),
+    low  = na.locf(low, fromLast = TRUE, na.rm = FALSE),
+    close = na.locf(close, fromLast = TRUE, na.rm = FALSE),
+    volume = na.locf(volume, fromLast = TRUE, na.rm = FALSE)
+  ) %>%
+  ungroup()
+
+# Confirm missing values are gone
+stocks %>%
+  summarise(across(where(is.numeric), ~ sum(is.na(.))))
+
+```
+## Create financial indicators
+
+We'll create useful finance indicators:
+- Daily return
+- Log return
+- Price range (volatility proxy)
+
+N.B first instance of each stock will have NA for daily return and log return
+
+```{r}
+stocks <- stocks %>%
+  group_by(name) %>%
+  arrange(date) %>%
+  mutate(
+    daily_return = (close - lag(close)) / lag(close),
+    log_return = log(close / lag(close)),
+    daily_range = high - low
+  ) %>%
+  ungroup()
+
+summary(stocks$daily_return)
+
+```
+## Descriptive statistics
+
+
+```{r}
+#Overall summary
+skim(stocks)
+
+#Summary by stock
+stock_summary <- stocks %>%
+  group_by(name) %>%
+  summarise(
+    n_days = n(),
+    avg_close = mean(close, na.rm = TRUE),
+    sd_close = sd(close, na.rm = TRUE),
+    avg_volume = mean(volume, na.rm = TRUE),
+    avg_daily_return = mean(daily_return, na.rm = TRUE),
+    sd_daily_return = sd(daily_return, na.rm = TRUE)
+  ) %>%
+  arrange(desc(avg_close))
+
+head(stock_summary, 10)
+
+```
+## Visualise data
+
+Top 10 stocks by average closing price
+
+```{r}
+top10_close <- stock_summary %>%
+  slice_max(avg_close, n = 10)
+
+ggplot(top10_close, aes(x = reorder(name, avg_close), y = avg_close)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Top 10 Stocks by Average Closing Price",
+    x = "Stock",
+    y = "Average Closing Price ($)"
+  )
+
+```
+Closing Price Trend for Selected Companies
+
+- We'll visualize Apple, Microsoft, and Google (Alphabet).
+
+```{r}
+selected_stocks <- c("AAPL", "MSFT", "GOOGL")
+
+stocks %>%
+  filter(name %in% selected_stocks) %>%
+  ggplot(aes(x = date, y = close, color = name)) +
+  geom_line(linewidth = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "Closing Price Trend (Selected Companies)",
+    x = "Date",
+    y = "Closing Price ($)",
+    color = "Ticker"
+  )
+
+```
+Distribution of daily returns
+
+```{r}
+ggplot(stocks, aes(x = daily_return)) +
+  geom_histogram(bins = 100, fill = "darkgreen", alpha = 0.7) +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Daily Returns (All Stocks)",
+    x = "Daily Return",
+    y = "Count"
+  )
+
+```
+Correlation heatmap (numeric variables)
+
+```{r}
+#Get subset of data for heatmap
+num_data <- stocks %>%
+  select(open, high, low, close, volume, daily_range) %>%
+  drop_na()
+
+#Calculate correlation matrix
+cor_matrix <- cor(num_data)
+
+#Plot heatmap
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.8)
+
+```
+## Hypothesis 1
+
+Hypothesis 1:
+Stocks with higher trading volume tend to have higher volatility (daily price range).
+- Null Hypothesis (H0): Volume is not correlated with volatility
+- Alternative Hypothesis (H1): Volume is positively correlated with volatility
+
+We will use:
+- Pearson correlation (if assumptions are met)
+- Spearman correlation (if assumptions are violated)
+
+
+
+Prepare dataset
+
+```{r}
+#Prepare dataset for hypothesis 1 testing
+hyp1_data <- stocks %>%
+  select(volume, daily_range) %>%
+  drop_na()
+
+summary(hyp1_data)
+
+```
+
+Visualise relationship (volume vs volatility)
+
+```{r}
+
+#Scatter plot
+ggplot(hyp1_data, aes(x = volume, y = daily_range)) +
+  geom_point(alpha = 0.2) +
+  scale_x_log10() +
+  theme_minimal() +
+  labs(
+    title = "Trading Volume vs Daily Price Range",
+    x = "Volume (log scale)",
+    y = "Daily Range (High - Low)"
+  )
+
+```
+Check assumptions for Pearson correlation
+
+Pearson correlation assumes:
+- linear relationship
+- no major outliers
+- approximately normal distributions
+
+```{r}
+# Normality check (Shapiro test on a sample due to large dataset size)
+set.seed(123)
+
+sample_data <- hyp1_data %>% slice_sample(n = 5000)
+
+shapiro_volume <- shapiro.test(sample_data$volume)
+shapiro_range <- shapiro.test(sample_data$daily_range)
+
+shapiro_volume$p.value
+shapiro_range$p.value
+#> p-values are very small, data is not normally distributed (common in finance)
+
+#Check outliers
+check_outliers(hyp1_data$volume)
+check_outliers(hyp1_data$daily_range)
+#> There are many outliers
+
+#> We can ignore violation of normality due to large n. With large n, the sampling distribution of Pearson's r tends to behave well due to asymptotic theory. However, Pearson correlation is very sensitive to outliers so they are big problem.
+
+```
+Run correlation
+
+Because data are highly skewed and include outliers, we will use Spearman correlation (robust for non-normality).
+
+```{r}
+#Spearman correlation
+cor_test_hyp1 <- cor.test(
+  hyp1_data$volume,
+  hyp1_data$daily_range,
+  method = "spearman"
+)
+
+cor_test_hyp1 
+
+```
+Report Correlation
+
+```{r}
+cat("Hypothesis 1 Results:\n")
+cat("Spearman Correlation S:", round(cor_test_hyp1$estimate, 3), "\n")
+cat("p-value:", cor_test_hyp1$p.value, "\n")
+
+if (cor_test_hyp1$p.value < 0.05) {
+  cat("Conclusion: Reject H0. There is evidence of an association between volume and volatility using p threshold of 0.05.\n")
+} else {
+  cat("Conclusion: Fail to reject H0. No evidence of association found.\n")
+}
+
+```
+## Hypothesis 2
+
+Daily volatility (daily_range) significantly predicts daily return.
+- H0: Volatility does not predict daily return
+- H1: Volatility significantly predicts daily return
+
+We will build a linear regression model:
+daily return = b0 + b1(daily range) + c
+
+
+Prepare dataset for hypothesis 2
+
+```{r}
+#Prepare subset of data
+hyp2_data <- stocks %>%
+  select(daily_return, daily_range) %>%
+  drop_na()
+
+summary(hyp2_data)
+
+```
+Visualise return vs volatility
+
+```{r}
+#Scatter plot
+ggplot(hyp2_data, aes(x = daily_range, y = daily_return)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1) +
+  theme_minimal() +
+  labs(
+    title = "Daily Range vs Daily Return",
+    x = "Daily Range (High - Low)",
+    y = "Daily Return"
+  )
+
+```
+Fit linear model
+
+```{r}
+model1 <- lm(daily_return ~ daily_range, data = hyp2_data)
+
+summary(model1)
+
+```
+Before trusting the model results, we must test assumptions:
+- normality of residuals (if violated use transformation or robust regression)
+- homoscedasticity (if violated, use robust SEs, transformation, or robust regression)
+- multicollinearity (only applies with more than one independent variable)
+- influential outliers (if violated use transformation, sensitivity analysis, dummy coding [i.e. explicity model outliers], or winsorisation)
+- linearity (if violated include non-linear terms)
+
+```{r}
+#Check normality of residuals
+
+#check_model(model1) #Takes a long time due to simulation-based approach and large n
+check_norm = (check_normality(model1))
+plot(norm_check)
+check_norm 
+#>> Non-normal residuals detected. However, we can ignore this due to our enormous sample size. Central limit theorem ensures CIs and p values are valid.
+
+#Check heteroskedasticity
+
+check_hetero = check_heteroskedasticity(model1)
+#plot(check_hetero) #plot takes too long
+check_hetero
+#>> Heteroskedasticity detected
+
+
+#Check outliers
+check_outliers(model1) #No influential outliers
+
+```
+
+To deal with heteroskedasticity, use robust SEs.
+
+```{r}
+#Calculate robust SEs
+robust_results <- coeftest(model1, vcov = vcovHC(model1, type = "HC1"))
+robust_results
+
+```
+Report results
+
+```{r}
+report(model1)
+model_performance(model1)
+
+#Report results with robust SEs
+cat("\nRegression Results with robust SEs to account for heterosketasticity:\n")
+print(robust_results)
+
+p_val <- robust_results[2, 4]
+
+if (p_val < 0.05) {
+  cat("\nConclusion: Reject H0. Daily volatility significantly predicts daily returns.\n")
+} else {
+  cat("\nConclusion: Fail to reject H0. Volatility is not a significant predictor of daily returns.\n")
+}
+
+```
+
